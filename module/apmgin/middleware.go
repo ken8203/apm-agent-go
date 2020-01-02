@@ -24,6 +24,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"go.elastic.co/apm"
+	"go.elastic.co/apm/model"
 	"go.elastic.co/apm/module/apmhttp"
 	"go.elastic.co/apm/stacktrace"
 )
@@ -101,6 +102,7 @@ func (m *middleware) handle(c *gin.Context) {
 	defer tx.End()
 
 	body := m.tracer.CaptureHTTPRequestBody(c.Request)
+	user := retrieveUserFromContext(c)
 	defer func() {
 		if v := recover(); v != nil {
 			if !c.Writer.Written() {
@@ -110,20 +112,20 @@ func (m *middleware) handle(c *gin.Context) {
 			}
 			e := m.tracer.Recovered(v)
 			e.SetTransaction(tx)
-			setContext(&e.Context, c, body)
+			setContext(&e.Context, c, body, user)
 			e.Send()
 		}
 		c.Writer.WriteHeaderNow()
 		tx.Result = apmhttp.StatusCodeResult(c.Writer.Status())
 
 		if tx.Sampled() {
-			setContext(&tx.Context, c, body)
+			setContext(&tx.Context, c, body, user)
 		}
 
 		for _, err := range c.Errors {
 			e := m.tracer.NewError(err.Err)
 			e.SetTransaction(tx)
-			setContext(&e.Context, c, body)
+			setContext(&e.Context, c, body, user)
 			e.Handled = true
 			e.Send()
 		}
@@ -132,12 +134,27 @@ func (m *middleware) handle(c *gin.Context) {
 	c.Next()
 }
 
-func setContext(ctx *apm.Context, c *gin.Context, body *apm.BodyCapturer) {
+func setContext(ctx *apm.Context, c *gin.Context, body *apm.BodyCapturer, user *model.User) {
 	ctx.SetFramework("gin", gin.Version)
 	ctx.SetHTTPRequest(c.Request)
 	ctx.SetHTTPRequestBody(body)
 	ctx.SetHTTPStatusCode(c.Writer.Status())
 	ctx.SetHTTPResponseHeaders(c.Writer.Header())
+
+	if user != nil {
+		ctx.SetUserID(user.ID)
+		ctx.SetUsername(user.Username)
+		ctx.SetUserEmail(user.Email)
+	}
+}
+
+func retrieveUserFromContext(c *gin.Context) *model.User {
+	if u := c.Value("user"); u != nil {
+		if user, ok := u.(*model.User); ok {
+			return user
+		}
+	}
+	return nil
 }
 
 // Option sets options for tracing.

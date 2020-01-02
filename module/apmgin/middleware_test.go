@@ -62,12 +62,26 @@ func TestMiddlewareHTTPSuite(t *testing.T) {
 }
 
 func TestMiddleware(t *testing.T) {
+	var user = &model.User{
+		Username: "username",
+		ID:       "id",
+		Email:    "test@email.com",
+	}
+
 	debugOutput.Reset()
 	tracer, transport := transporttest.NewRecorderTracer()
 	defer tracer.Close()
 
 	e := gin.New()
-	e.Use(apmgin.Middleware(e, apmgin.WithTracer(tracer)))
+	e.Use(
+		func() gin.HandlerFunc {
+			return func(c *gin.Context) {
+				c.Set("user", user)
+				c.Next()
+			}
+		}(),
+		apmgin.Middleware(e, apmgin.WithTracer(tracer)),
+	)
 	e.GET("/hello/:name", handleHello)
 
 	w := httptest.NewRecorder()
@@ -114,6 +128,7 @@ func TestMiddleware(t *testing.T) {
 				Values: []string{"text/plain; charset=utf-8"},
 			}},
 		},
+		User: user,
 	}, transaction.Context)
 }
 
