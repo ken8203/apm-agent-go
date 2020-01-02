@@ -62,12 +62,33 @@ func TestMiddlewareHTTPSuite(t *testing.T) {
 }
 
 func TestMiddleware(t *testing.T) {
+	var (
+		user = &model.User{
+			ID:       "id",
+			Username: "username",
+			Email:    "test@email.com",
+		}
+		labels = map[string]interface{}{
+			"key": "value",
+		}
+	)
+
 	debugOutput.Reset()
 	tracer, transport := transporttest.NewRecorderTracer()
 	defer tracer.Close()
 
 	e := gin.New()
-	e.Use(apmgin.Middleware(e, apmgin.WithTracer(tracer)))
+	e.Use(
+		func() gin.HandlerFunc {
+			return func(c *gin.Context) {
+				c.Set(apmgin.ContextKeyUser, user)
+				c.Set(apmgin.ContextKeyLabels, labels)
+
+				c.Next()
+			}
+		}(),
+		apmgin.Middleware(e, apmgin.WithTracer(tracer)),
+	)
 	e.GET("/hello/:name", handleHello)
 
 	w := httptest.NewRecorder()
@@ -113,6 +134,13 @@ func TestMiddleware(t *testing.T) {
 				Key:    "Content-Type",
 				Values: []string{"text/plain; charset=utf-8"},
 			}},
+		},
+		User: user,
+		Tags: model.IfaceMap{
+			model.IfaceMapItem{
+				Key:   "key",
+				Value: "value",
+			},
 		},
 	}, transaction.Context)
 }

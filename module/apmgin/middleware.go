@@ -18,14 +18,21 @@
 package apmgin
 
 import (
+	"fmt"
 	"net/http"
 	"sync"
 
 	"github.com/gin-gonic/gin"
 
 	"go.elastic.co/apm"
+	"go.elastic.co/apm/model"
 	"go.elastic.co/apm/module/apmhttp"
 	"go.elastic.co/apm/stacktrace"
+)
+
+const (
+	ContextKeyUser   = "apm.user"
+	ContextKeyLabels = "apm.labels"
 )
 
 func init() {
@@ -138,6 +145,27 @@ func setContext(ctx *apm.Context, c *gin.Context, body *apm.BodyCapturer) {
 	ctx.SetHTTPRequestBody(body)
 	ctx.SetHTTPStatusCode(c.Writer.Status())
 	ctx.SetHTTPResponseHeaders(c.Writer.Header())
+
+	setLabels(ctx, retrieveLabelsFromContext(c))
+	setUserContext(ctx, retrieveUserFromContext(c))
+}
+
+func setUserContext(ctx *apm.Context, user *model.User) {
+	if user == nil {
+		return
+	}
+	ctx.SetUsername(user.Username)
+	ctx.SetUserID(user.ID)
+	ctx.SetUserEmail(user.Email)
+}
+
+func setLabels(ctx *apm.Context, labels map[string]interface{}) {
+	if len(labels) == 0 {
+		return
+	}
+	for k, v := range labels {
+		ctx.SetLabel(k, stringify(v))
+	}
 }
 
 // Option sets options for tracing.
@@ -164,4 +192,29 @@ func WithRequestIgnorer(r apmhttp.RequestIgnorerFunc) Option {
 	return func(m *middleware) {
 		m.requestIgnorer = r
 	}
+}
+
+func retrieveUserFromContext(c *gin.Context) *model.User {
+	if u := c.Value(ContextKeyUser); u != nil {
+		if user, ok := u.(*model.User); ok {
+			return user
+		}
+	}
+	return nil
+}
+
+func retrieveLabelsFromContext(c *gin.Context) map[string]interface{} {
+	if l := c.Value(ContextKeyLabels); l != nil {
+		if labels, ok := l.(map[string]interface{}); ok {
+			return labels
+		}
+	}
+	return nil
+}
+
+func stringify(v interface{}) string {
+	if v, ok := v.(string); ok {
+		return v
+	}
+	return fmt.Sprint(v)
 }
