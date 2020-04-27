@@ -38,6 +38,81 @@ var (
 	tracestateHeader         = strings.ToLower(apmhttp.TracestateHeader)
 )
 
+type serverStream struct {
+	grpc.ServerStream
+	method string
+	ctx    context.Context
+}
+
+func (ss *serverStream) Context() context.Context {
+	return ss.ctx
+}
+
+func (ss *serverStream) RecvMsg(m interface{}) (err error) {
+	span, _ := apm.StartSpan(ss.ctx, "RecvMsg", "custom")
+	defer span.End()
+	err = ss.ServerStream.RecvMsg(m)
+	return err
+}
+
+func (ss *serverStream) SendMsg(m interface{}) (err error) {
+	span, _ := apm.StartSpan(ss.ctx, "SendMsg", "custom")
+	defer span.End()
+	err = ss.ServerStream.SendMsg(m)
+	return err
+}
+
+// NewStreamingServerInterceptor returns a grpc.StreamServerInterceptor that
+// traces gRPC requests with the given options.
+//
+// The interceptor will trace transactions with the "grpc" type for each
+// incoming request. The transaction will be added to the context, so
+// server methods can use apm.StartSpan with the provided context.
+//
+// By default, the interceptor will trace with apm.DefaultTracer,
+// and will not recover any panics. Use WithTracer to specify an
+// alternative tracer, and WithRecovery to enable panic recovery.
+func NewStreamingServerInterceptor(o ...ServerOption) grpc.StreamServerInterceptor {
+	opts := serverOptions{
+		tracer:         apm.DefaultTracer,
+		recover:        false,
+		requestIgnorer: DefaultServerRequestIgnorer(),
+	}
+	for _, o := range o {
+		o(&opts)
+	}
+
+	return func(
+		srv interface{},
+		ss grpc.ServerStream,
+		info *grpc.StreamServerInfo,
+		handler grpc.StreamHandler,
+	) (err error) {
+		if !opts.tracer.Active() {
+			return handler(srv, ss)
+		}
+
+		tx, ctx := startTransaction(ss.Context(), opts.tracer, info.FullMethod)
+		defer tx.End()
+
+		// TODO(axw) define context schema for RPC,
+		// including at least the peer address.
+
+		defer func() {
+			err = sendRecoveredError(opts, tx)
+		}()
+
+		err = handler(srv, &serverStream{
+			ServerStream: ss,
+			method:       info.FullMethod,
+			ctx:          ctx,
+		})
+		setTransactionResult(tx, err)
+
+		return err
+	}
+}
+
 // NewUnaryServerInterceptor returns a grpc.UnaryServerInterceptor that
 // traces gRPC requests with the given options.
 //
@@ -73,19 +148,7 @@ func NewUnaryServerInterceptor(o ...ServerOption) grpc.UnaryServerInterceptor {
 		// including at least the peer address.
 
 		defer func() {
-			r := recover()
-			if r != nil {
-				e := opts.tracer.Recovered(r)
-				e.SetTransaction(tx)
-				e.Context.SetFramework("grpc", grpc.Version)
-				e.Handled = opts.recover
-				e.Send()
-				if opts.recover {
-					err = status.Errorf(codes.Internal, "%s", r)
-				} else {
-					panic(r)
-				}
-			}
+			err = sendRecoveredError(opts, tx)
 		}()
 
 		resp, err = handler(ctx, req)
@@ -129,6 +192,24 @@ func setTransactionResult(tx *apm.Transaction, err error) {
 		}
 		tx.Result = statusCode.String()
 	}
+}
+
+func sendRecoveredError(opts serverOptions, tx *apm.Transaction) (err error) {
+	r := recover()
+	if r != nil {
+		e := opts.tracer.Recovered(r)
+		e.SetTransaction(tx)
+		e.Context.SetFramework("grpc", grpc.Version)
+		e.Handled = opts.recover
+		e.Send()
+		if opts.recover {
+			return status.Errorf(codes.Internal, "%s", r)
+		} else {
+			panic(r)
+		}
+	}
+
+	return nil
 }
 
 type serverOptions struct {
